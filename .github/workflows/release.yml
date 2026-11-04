@@ -1,4 +1,4 @@
-# Pushing a v* tag builds the worker for Windows and Linux with that version and the release key in
+# Pushing a version tag (like 0.1.0) builds the worker for Windows and Linux with that version and the release key in
 # src/release-key.pub, signs their manifest with BAR-Rewind's sign tool and puts them in a draft release.
 # The key lives in the `release` environment, so a run waits for whoever that environment names as
 # reviewers; it is the same key BAR-Rewind's releases are signed with.
@@ -6,7 +6,7 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
 
 permissions: {}
 

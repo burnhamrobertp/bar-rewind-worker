@@ -59,7 +59,7 @@ zig build test
 zig build dist                     # Windows and Linux, in zig-out/dist
 ```
 
-Pushing a `v*` tag builds a release: GitHub Actions tests, builds `dist` with that version and the key in
+Pushing a version tag (like `0.1.0`) builds a release: GitHub Actions tests, builds `dist` with that version and the key in
 `src/release-key.pub`, signs a `manifest.json` with BAR-Rewind's sign tool and drafts the release. The private
 key lives in the repo's `release` environment and is the same one BAR-Rewind's releases are signed with.
 

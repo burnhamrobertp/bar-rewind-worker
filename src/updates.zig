@@ -176,15 +176,15 @@ pub fn trial(pending: ?Pending, running: []const u8) Trial {
 }
 
 test "trials count starts up to the limit, for the version the update went to" {
-    try std.testing.expectEqual(Trial.none, trial(null, "v2"));
-    try std.testing.expectEqual(Trial.stale, trial(.{ .from = "v1", .to = "v2" }, "v1"));
-    try std.testing.expectEqual(Trial.start, trial(.{ .from = "v1", .to = "v2", .starts = max_starts - 1 }, "v2"));
-    try std.testing.expectEqual(Trial.roll_back, trial(.{ .from = "v1", .to = "v2", .starts = max_starts }, "v2"));
+    try std.testing.expectEqual(Trial.none, trial(null, "2.0.0"));
+    try std.testing.expectEqual(Trial.stale, trial(.{ .from = "1.0.0", .to = "2.0.0" }, "1.0.0"));
+    try std.testing.expectEqual(Trial.start, trial(.{ .from = "1.0.0", .to = "2.0.0", .starts = max_starts - 1 }, "2.0.0"));
+    try std.testing.expectEqual(Trial.roll_back, trial(.{ .from = "1.0.0", .to = "2.0.0", .starts = max_starts }, "2.0.0"));
 }
 
 test "release names can't become paths" {
-    try std.testing.expect(plainVersion("v0.5.0"));
-    try std.testing.expect(plainVersion("v1.2.3-rc_1"));
+    try std.testing.expect(plainVersion("0.5.0"));
+    try std.testing.expect(plainVersion("1.2.3-rc_1"));
     for ([_][]const u8{ "", "..", ".hidden", "v1/../x", "v1\\x", "v 1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }) |bad| try std.testing.expect(!plainVersion(bad));
 }
 
@@ -207,16 +207,16 @@ test "a manifest counts only signed by the key, for the pinned version" {
     const gpa = arena.allocator();
     const pair = try Ed25519.KeyPair.generateDeterministic(@splat(7));
     const other = try Ed25519.KeyPair.generateDeterministic(@splat(8));
-    const json = "{\"version\":\"v0.5.0\",\"curves_version\":11,\"files\":[{\"name\":\"bake.exe\",\"size\":4,\"sha256\":\"ab\"}]}";
+    const json = "{\"version\":\"0.5.0\",\"curves_version\":11,\"files\":[{\"name\":\"bake.exe\",\"size\":4,\"sha256\":\"ab\"}]}";
     const sig = std.fmt.bytesToHex((try pair.sign(json, null)).toBytes(), .lower);
 
-    const m = try checkManifest(gpa, json, &sig, pair.public_key, "v0.5.0");
+    const m = try checkManifest(gpa, json, &sig, pair.public_key, "0.5.0");
     try std.testing.expectEqualStrings("bake.exe", m.files[0].name);
-    try std.testing.expectError(error.NotThePinnedRelease, checkManifest(gpa, json, &sig, pair.public_key, "v0.6.0"));
-    try std.testing.expectError(error.BadSignature, checkManifest(gpa, json, &sig, other.public_key, "v0.5.0"));
-    try std.testing.expectError(error.BadSignature, checkManifest(gpa, json, sig[0..100], pair.public_key, "v0.5.0"));
+    try std.testing.expectError(error.NotThePinnedRelease, checkManifest(gpa, json, &sig, pair.public_key, "0.6.0"));
+    try std.testing.expectError(error.BadSignature, checkManifest(gpa, json, &sig, other.public_key, "0.5.0"));
+    try std.testing.expectError(error.BadSignature, checkManifest(gpa, json, sig[0..100], pair.public_key, "0.5.0"));
     const forged = try std.mem.replaceOwned(u8, gpa, json, "\"size\":4", "\"size\":5");
-    try std.testing.expectError(error.BadSignature, checkManifest(gpa, forged, &sig, pair.public_key, "v0.5.0"));
+    try std.testing.expectError(error.BadSignature, checkManifest(gpa, forged, &sig, pair.public_key, "0.5.0"));
 }
 
 test "a file matches its entry only at the listed size and hash" {
@@ -247,10 +247,10 @@ test "swapping in a new worker keeps the old one to roll back to" {
     try tmp.dir.writeFile(io, .{ .sub_path = "staged", .data = "new" });
     const exe = try std.fs.path.join(gpa, &.{ dir, "worker" });
     const pending = try std.fs.path.join(gpa, &.{ dir, "pending.json" });
-    try swapIn(gpa, io, exe, try std.fs.path.join(gpa, &.{ dir, "staged" }), pending, .{ .from = "v1", .to = "v2" });
+    try swapIn(gpa, io, exe, try std.fs.path.join(gpa, &.{ dir, "staged" }), pending, .{ .from = "1.0.0", .to = "2.0.0" });
     var buffer: [8]u8 = undefined;
     try std.testing.expectEqualStrings("new", try tmp.dir.readFile(io, "worker", &buffer));
-    try std.testing.expectEqualStrings("v2", readPending(gpa, io, pending).?.to);
+    try std.testing.expectEqualStrings("2.0.0", readPending(gpa, io, pending).?.to);
     try rollBack(gpa, io, exe);
     try std.testing.expectEqualStrings("old", try tmp.dir.readFile(io, "worker", &buffer));
 }
