@@ -13,6 +13,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const api = @import("api.zig");
+const housekeeping = @import("housekeeping.zig");
 const install = @import("install.zig");
 const job = @import("job.zig");
 const state = @import("state.zig");
@@ -47,6 +48,7 @@ const Runtime = struct {
     parser_version: []const u8 = "",
     parser_path: ?[]const u8 = null,
     on_trial: bool = false,
+    busy: housekeeping.Busy = .none,
 
     fn pendingPath(rt: Runtime, arena: Allocator) ![]const u8 {
         return std.fs.path.join(arena, &.{ rt.home, "update.json" });
@@ -139,6 +141,7 @@ pub fn main(init: std.process.Init) !void {
     };
     system.lowerPriority();
     try seedEngine(arena, io, init.environ_map, paths.bar);
+    housekeeping.pruneEngines(arena, io, paths.bar);
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -271,6 +274,12 @@ fn serve(gpa: Allocator, io: Io, server: *api.Api, rt: *Runtime, base: job.Paths
         };
     }
     if (settings.paused) return settings.poll_seconds;
+    const busy = housekeeping.busy(arena, io, paths.bar);
+    if (busy != rt.busy) {
+        if (busy == .none) std.log.info("taking jobs again", .{}) else std.log.info("not taking jobs while {s}", .{busy.reason()});
+        rt.busy = busy;
+    }
+    if (busy != .none) return settings.poll_seconds;
 
     const claim = try server.post(arena, "/api/worker/claim", .{});
     if (claim.status == 401) return error.Revoked;
@@ -279,6 +288,7 @@ fn serve(gpa: Allocator, io: Io, server: *api.Api, rt: *Runtime, base: job.Paths
     const work = try claim.parse(job.Claim, arena);
     std.log.info("parsing {s}", .{work.job.id});
     job.run(gpa, io, server, paths, work) catch |err| std.log.warn("job {s}: {s}", .{ work.job.id, @errorName(err) });
+    housekeeping.pruneEngines(arena, io, paths.bar);
 
     return 0;
 }

@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const api = @import("api.zig");
+const housekeeping = @import("housekeeping.zig");
 const system = @import("system.zig");
 
 const Io = std.Io;
@@ -120,6 +121,7 @@ fn deliver(arena: Allocator, io: Io, server: *api.Api, paths: Paths, id: []const
     shared.set(io, 100, "uploading");
     try gzipFile(io, curves, packed_path);
     try uploadCurves(arena, io, server, id, claim.uploads.curves, packed_path);
+    if (engineOf(arena, io, paths.bake, curves)) |engine| housekeeping.markUsed(arena, io, paths.bar, engine, Io.Timestamp.now(io, .real).toSeconds());
     const events = listEvents(arena, io, paths.bake, curves);
     const shown = events[0..@min(events.len, events_listed)];
     const reply = try server.post(arena, try std.fmt.allocPrint(arena, "/api/worker/jobs/{s}/done", .{id}), .{
@@ -292,6 +294,15 @@ fn uploadLog(arena: Allocator, io: Io, server: *api.Api, upload: Uploads.Upload,
         return;
     };
     if (status != 200) std.log.warn("the log upload answered {d}", .{status});
+}
+
+/// The engine a .curves was recorded on, from `bake info`'s engine= line
+fn engineOf(arena: Allocator, io: Io, bake: []const u8, curves: []const u8) ?[]const u8 {
+    const result = std.process.run(arena, io, .{ .argv = &.{ bake, "info", curves }, .create_no_window = true }) catch return null;
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| if (std.mem.startsWith(u8, line, "engine=")) return std.mem.trim(u8, line["engine=".len..], " \r");
+
+    return null;
 }
 
 const Event = struct { f: u64 = 0, kind: []const u8 = "", player: []const u8 = "", text: []const u8 = "" };
