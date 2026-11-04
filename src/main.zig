@@ -1,5 +1,9 @@
 //! bar-rewind-worker: parses replays for a BAR Rewind server on a moderator's machine.
-//!   bar-rewind-worker [--server <url>] [--bake <path>]
+//!   bar-rewind-worker install [--server <url>]   enroll if need be, then run unattended from now on
+//!   bar-rewind-worker uninstall                  stop running unattended
+//!   bar-rewind-worker [--server <url>] [--bake <path>] [--background]
+//! The supervisor started by --background runs the worker with --unattended: one that isn't enrolled stops,
+//! since nobody is there to approve it.
 //! The first run enrolls: it shows a code and opens the server's site, where the machine's owner approves
 //! it. After that it asks the server for work, parses with BAR-Rewind's bake in a BAR data folder of its
 //! own (seeded with an engine from the BAR install here), and reports back. It keeps the parser and itself
@@ -9,8 +13,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const api = @import("api.zig");
+const install = @import("install.zig");
 const job = @import("job.zig");
 const state = @import("state.zig");
+const supervise = @import("supervise.zig");
 const system = @import("system.zig");
 const updates = @import("updates.zig");
 
@@ -56,24 +62,68 @@ pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.smp_allocator;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
+    const command: enum { serve, install, uninstall } = if (args.len > 1 and std.mem.eql(u8, args[1], "install"))
+        .install
+    else if (args.len > 1 and std.mem.eql(u8, args[1], "uninstall")) .uninstall else .serve;
     var server_url: []const u8 = default_server;
     var bake: ?[]const u8 = null;
-    var i: usize = 1;
+    var background = false;
+    var unattended = false;
+    var i: usize = if (command == .serve) 1 else 2;
     while (i < args.len) : (i += 1) {
         if (i + 1 < args.len and std.mem.eql(u8, args[i], "--server")) {
             i += 1;
             server_url = args[i];
-        } else if (i + 1 < args.len and std.mem.eql(u8, args[i], "--bake")) {
+        } else if (i + 1 < args.len and command == .serve and std.mem.eql(u8, args[i], "--bake")) {
             i += 1;
             bake = args[i];
+        } else if (command == .serve and std.mem.eql(u8, args[i], "--background")) {
+            background = true;
+        } else if (command == .serve and std.mem.eql(u8, args[i], "--unattended")) {
+            unattended = true;
         } else {
-            std.debug.print("usage: bar-rewind-worker [--server <url>] [--bake <path>]\n", .{});
+            std.debug.print("usage: bar-rewind-worker install [--server <url>] | uninstall | [--server <url>] [--bake <path>] [--background]\n", .{});
             std.process.exit(2);
         }
     }
 
     const home = try homeDir(arena, init.environ_map);
     try Io.Dir.cwd().createDirPath(io, home);
+    const state_path = try std.fs.path.join(arena, &.{ home, "worker.json" });
+    switch (command) {
+        .uninstall => {
+            try install.uninstall(arena, io, init.environ_map, install.task_name);
+            std.debug.print("The worker no longer starts on its own. Its files are in {s}\n", .{home});
+
+            return;
+        },
+        .install => {
+            var client: std.http.Client = .{ .allocator = gpa, .io = io };
+            defer client.deinit();
+            var server: api.Api = .{ .client = &client, .base = server_url };
+            const saved = try state.load(io, arena, state_path);
+            if (saved == null or !std.mem.eql(u8, saved.?.server, server_url)) try state.save(io, arena, state_path, try enroll(arena, io, &server, init.environ_map));
+            const exe = try install.install(arena, io, init.environ_map, home, &.{ "--background", "--server", server_url }, install.task_name);
+            std.debug.print("The worker runs on its own now, and starts again at every sign-in: {s}\nIts log: {s}\n", .{
+                exe, try std.fs.path.join(arena, &.{ home, "worker.log" }),
+            });
+
+            return;
+        },
+        .serve => {},
+    }
+    if (background) try supervise.run(arena, io, home, args[1..], restart_code);
+
+    // one worker per machine: a second would parse in the same folders
+    const lock_path = try std.fs.path.join(arena, &.{ home, "worker.lock" });
+    const lock = Io.Dir.cwd().createFile(io, lock_path, .{ .lock = .exclusive, .lock_nonblocking = true, .truncate = false }) catch |err| switch (err) {
+        error.WouldBlock => {
+            std.log.err("another worker is already running here", .{});
+            std.process.exit(1);
+        },
+        else => return err,
+    };
+    defer lock.close(io);
     var rt: Runtime = .{
         .home = home,
         .exe = try std.process.executablePathAlloc(io, arena),
@@ -87,7 +137,6 @@ pub fn main(init: std.process.Init) !void {
         .bar = try std.fs.path.join(arena, &.{ home, "bar" }),
         .work = try std.fs.path.join(arena, &.{ home, "work" }),
     };
-    const state_path = try std.fs.path.join(arena, &.{ home, "worker.json" });
     system.lowerPriority();
     try seedEngine(arena, io, init.environ_map, paths.bar);
 
@@ -101,6 +150,10 @@ pub fn main(init: std.process.Init) !void {
         const saved = try state.load(io, a, state_path);
         const me = if (saved) |s| (if (std.mem.eql(u8, s.server, server_url)) s else null) else null;
         if (me == null) {
+            if (unattended) {
+                std.log.err("this worker isn't enrolled with {s} (or was removed there): run `bar-rewind-worker install` again", .{server_url});
+                std.process.exit(1);
+            }
             const enrolled = enroll(a, io, &server, init.environ_map) catch |err| {
                 std.log.err("enrolling with {s} failed ({s}); trying again in a minute", .{ server_url, @errorName(err) });
                 try io.sleep(.fromSeconds(60), .awake);

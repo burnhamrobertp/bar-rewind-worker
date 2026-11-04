@@ -114,7 +114,15 @@ pub const max_starts = 3;
 /// Puts `staged` where the running worker is; the running one is kept as <exe>.old to come back to
 pub fn swapIn(arena: Allocator, io: Io, exe: []const u8, staged: []const u8, pending_path: []const u8, pending: Pending) !void {
     const old = try std.fmt.allocPrint(arena, "{s}.old", .{exe});
-    Io.Dir.cwd().deleteFile(io, old) catch {};
+    // the supervisor may still be running the last update's .old, which Windows won't delete: it moves aside
+    Io.Dir.cwd().deleteFile(io, old) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => {
+            const older = try std.fmt.allocPrint(arena, "{s}.older", .{exe});
+            Io.Dir.cwd().deleteFile(io, older) catch {};
+            try move(arena, io, old, older);
+        },
+    };
     // a running program can be renamed but not overwritten
     try move(arena, io, exe, old);
     Io.Dir.cwd().copyFile(staged, Io.Dir.cwd(), exe, io, .{}) catch |err| {
