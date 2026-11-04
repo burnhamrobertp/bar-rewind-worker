@@ -104,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
             defer client.deinit();
             var server: api.Api = .{ .client = &client, .base = server_url };
             const saved = try state.load(io, arena, state_path);
-            if (saved == null or !std.mem.eql(u8, saved.?.server, server_url)) try state.save(io, arena, state_path, try enroll(arena, io, &server, init.environ_map));
+            if (saved == null or !std.mem.eql(u8, saved.?.server, server_url)) try state.save(io, arena, state_path, try enroll(arena, io, &server));
             const exe = try install.install(arena, io, init.environ_map, home, &.{ "--background", "--server", server_url }, install.task_name);
             std.debug.print("The worker runs on its own now, and starts again at every sign-in: {s}\nIts log: {s}\n", .{
                 exe, try std.fs.path.join(arena, &.{ home, "worker.log" }),
@@ -157,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
                 std.log.err("this worker isn't enrolled with {s} (or was removed there): run `bar-rewind-worker install` again", .{server_url});
                 std.process.exit(1);
             }
-            const enrolled = enroll(a, io, &server, init.environ_map) catch |err| {
+            const enrolled = enroll(a, io, &server) catch |err| {
                 std.log.err("enrolling with {s} failed ({s}); trying again in a minute", .{ server_url, @errorName(err) });
                 try io.sleep(.fromSeconds(60), .awake);
                 continue;
@@ -189,11 +189,15 @@ fn homeDir(arena: Allocator, env: *std.process.Environ.Map) ![]const u8 {
     return std.fs.path.join(arena, &.{ env.get("HOME") orelse return error.NoHome, ".local", "share", "bar-rewind-worker" });
 }
 
-fn hostname(arena: Allocator, env: *std.process.Environ.Map) []const u8 {
-    if (windows) return env.get("COMPUTERNAME") orelse "worker";
-    var buffer: [std.posix.HOST_NAME_MAX]u8 = undefined;
+/// A random (version 4) UUID: what the server knows this worker by
+fn newId(arena: Allocator, io: Io) ![]const u8 {
+    var bytes: [16]u8 = undefined;
+    try io.randomSecure(&bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = std.fmt.bytesToHex(bytes, .lower);
 
-    return arena.dupe(u8, std.posix.gethostname(&buffer) catch return "worker") catch "worker";
+    return std.fmt.allocPrint(arena, "{s}-{s}-{s}-{s}-{s}", .{ hex[0..8], hex[8..12], hex[12..16], hex[16..20], hex[20..32] });
 }
 
 fn openBrowser(io: Io, url: []const u8) void {
@@ -202,10 +206,10 @@ fn openBrowser(io: Io, url: []const u8) void {
     _ = child.wait(io) catch {};
 }
 
-fn enroll(arena: Allocator, io: Io, server: *api.Api, env: *std.process.Environ.Map) !state.State {
+fn enroll(arena: Allocator, io: Io, server: *api.Api) !state.State {
     server.token = null;
     const memory = system.memory(io);
-    const start = try server.post(arena, "/api/worker/enroll", .{ .name = hostname(arena, env), .mem_mb = memory.total_mb, .cpus = system.cpus(), .os = system.os_name });
+    const start = try server.post(arena, "/api/worker/enroll", .{ .id = try newId(arena, io), .mem_mb = memory.total_mb, .cpus = system.cpus(), .os = system.os_name });
     if (start.status != 200) return error.EnrollRefused;
     const Start = struct { device_code: []const u8, user_code: []const u8, verify_url: []const u8, interval: u64 = 5, expires_in: u64 = 900 };
     const s = try start.parse(Start, arena);
