@@ -42,8 +42,8 @@ pub const Api = struct {
 
 pub const Header = struct { name: []const u8, value: []const u8 };
 
-pub fn download(client: *std.http.Client, io: Io, url: []const u8, path: []const u8) !u16 {
-    const file = try Io.Dir.cwd().createFile(io, path, .{});
+pub fn download(client: *std.http.Client, io: Io, url: []const u8, path: []const u8, executable: bool) !u16 {
+    const file = try Io.Dir.cwd().createFile(io, path, .{ .permissions = if (executable) .executable_file else .default_file });
     defer file.close(io);
     var buffer: [1 << 16]u8 = undefined;
     var writer = file.writer(io, &buffer);

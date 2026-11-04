@@ -140,7 +140,7 @@ const Files = struct { demo: []const u8, curves: []const u8, log: []const u8, st
 
 fn parse(arena: Allocator, io: Io, client: *std.http.Client, paths: Paths, claim: Claim, shared: *Shared, files: Files) !void {
     failure = null;
-    const status = try api.download(client, io, claim.job.demo_url, files.demo);
+    const status = try api.download(client, io, claim.job.demo_url, files.demo, false);
     if (status != 200) {
         failure = try std.fmt.allocPrint(arena, "the demo download answered {d}", .{status});
         return error.DownloadFailed;

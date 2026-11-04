@@ -2,7 +2,9 @@
 //!   bar-rewind-worker [--server <url>] [--bake <path>]
 //! The first run enrolls: it shows a code and opens the server's site, where the machine's owner approves
 //! it. After that it asks the server for work, parses with BAR-Rewind's bake in a BAR data folder of its
-//! own (seeded with an engine from the BAR install here), and reports back.
+//! own (seeded with an engine from the BAR install here), and reports back. It keeps the parser and itself
+//! at the releases the server pins; after replacing itself it exits with restart_code, for whatever runs it
+//! to start it again.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -10,13 +12,44 @@ const api = @import("api.zig");
 const job = @import("job.zig");
 const state = @import("state.zig");
 const system = @import("system.zig");
+const updates = @import("updates.zig");
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const windows = builtin.os.tag == .windows;
 const exe_suffix = if (windows) ".exe" else "";
 const default_server = "https://bar-rewind.robotofham.com";
-const version = "0.1.0";
+const version = @import("options").version;
+const restart_code = 75;
+const parser_asset = if (windows) "bake.exe" else "bake-linux";
+const worker_asset = if (windows) "bar-rewind-worker.exe" else "bar-rewind-worker-linux";
+const release_key_hex = @embedFile("release-key.pub");
+
+/// The key releases are signed with, or null in a build without one: then nothing updates
+fn releaseKey() ?std.crypto.sign.Ed25519.PublicKey {
+    const bytes = updates.parseHex(32, release_key_hex) catch return null;
+
+    return std.crypto.sign.Ed25519.PublicKey.fromBytes(bytes) catch null;
+}
+
+/// What the worker runs: --bake, else the parser release the server pinned, else a bake beside the worker
+const Runtime = struct {
+    home: []const u8,
+    exe: []const u8,
+    bake_override: ?[]const u8,
+    fallback_bake: []const u8,
+    parser_version: []const u8 = "",
+    parser_path: ?[]const u8 = null,
+    on_trial: bool = false,
+
+    fn pendingPath(rt: Runtime, arena: Allocator) ![]const u8 {
+        return std.fs.path.join(arena, &.{ rt.home, "update.json" });
+    }
+
+    fn badPath(rt: Runtime, arena: Allocator) ![]const u8 {
+        return std.fs.path.join(arena, &.{ rt.home, "bad-worker-version" });
+    }
+};
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -41,8 +74,16 @@ pub fn main(init: std.process.Init) !void {
 
     const home = try homeDir(arena, init.environ_map);
     try Io.Dir.cwd().createDirPath(io, home);
+    var rt: Runtime = .{
+        .home = home,
+        .exe = try std.process.executablePathAlloc(io, arena),
+        .bake_override = bake,
+        .fallback_bake = try std.fs.path.join(arena, &.{ try std.process.executableDirPathAlloc(io, arena), "bake" ++ exe_suffix }),
+    };
+    try checkTrial(arena, io, &rt);
+    if (releaseKey() == null) std.log.warn("this build has no release key: the parser and the worker won't update", .{});
     const paths: job.Paths = .{
-        .bake = bake orelse try std.fs.path.join(arena, &.{ try std.process.executableDirPathAlloc(io, arena), "bake" ++ exe_suffix }),
+        .bake = "",
         .bar = try std.fs.path.join(arena, &.{ home, "bar" }),
         .work = try std.fs.path.join(arena, &.{ home, "work" }),
     };
@@ -70,7 +111,7 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
         server.token = me.?.token;
-        const wait = serve(gpa, io, &server, paths) catch |err| switch (err) {
+        const wait = serve(gpa, io, &server, &rt, paths) catch |err| switch (err) {
             error.Revoked => {
                 std.log.warn("the server no longer knows this worker: enrolling again", .{});
                 state.forget(io, state_path);
@@ -143,21 +184,39 @@ const Heartbeat = struct {
     poll_seconds: u64 = 15,
     paused: bool = false,
     pause_reason: ?[]const u8 = null,
+    releases: struct { parser: ?updates.Release = null, worker: ?updates.Release = null } = .{},
 };
 
-/// One round: report in, then take and run a job if one fits. Returns how long to wait before the next.
-fn serve(gpa: Allocator, io: Io, server: *api.Api, paths: job.Paths) !u64 {
+/// One round: report in, update to the pinned releases, then take and run a job if one fits. Returns how
+/// long to wait before the next.
+fn serve(gpa: Allocator, io: Io, server: *api.Api, rt: *Runtime, base: job.Paths) !u64 {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    var paths = base;
+    paths.bake = rt.bake_override orelse rt.parser_path orelse rt.fallback_bake;
     const memory = system.memory(io);
     const beat = try server.post(arena, "/api/worker/heartbeat", .{
         .mem_mb = memory.total_mb, .mem_free_mb = memory.free_mb, .cpus = system.cpus(), .os = system.os_name, .version = version,
-        .parser_version = parserVersion(arena, io, paths.bake), .disk_free_mb = system.diskFreeMb(arena, paths.bar),
+        .parser_version = if (rt.bake_override != null or rt.parser_path == null) parserVersion(arena, io, paths.bake) else rt.parser_version,
+        .disk_free_mb = system.diskFreeMb(arena, paths.bar),
     });
     if (beat.status == 401) return error.Revoked;
     if (beat.status != 200) return error.Unexpected;
+    if (rt.on_trial) endTrial(arena, io, rt);
     const settings = try beat.parse(Heartbeat, arena);
+    if (releaseKey()) |key| {
+        if (rt.bake_override == null) if (settings.releases.parser) |pin| if (!std.mem.eql(u8, pin.version, rt.parser_version)) {
+            try updateParser(gpa, arena, io, server.client, rt, pin, key);
+
+            return 0;
+        };
+        // a build of your own stays itself
+        if (!std.mem.eql(u8, version, "0.0.0-dev")) if (settings.releases.worker) |pin| {
+            if (!std.mem.eql(u8, pin.version, version) and !isBad(arena, io, rt.*, pin.version))
+                updateWorker(arena, io, server.client, rt.*, pin, key) catch |err| std.log.warn("can't update to worker {s}: {s}", .{ pin.version, @errorName(err) });
+        };
+    }
     if (settings.paused) return settings.poll_seconds;
 
     const claim = try server.post(arena, "/api/worker/claim", .{});
@@ -171,7 +230,74 @@ fn serve(gpa: Allocator, io: Io, server: *api.Api, paths: job.Paths) !u64 {
     return 0;
 }
 
-/// What `bake version` says: the parser's .curves format, until releases pin it by name
+fn updateParser(gpa: Allocator, arena: Allocator, io: Io, client: *std.http.Client, rt: *Runtime, pin: updates.Release, key: std.crypto.sign.Ed25519.PublicKey) !void {
+    if (!updates.plainVersion(pin.version)) return error.BadRelease;
+    const manifest = try updates.fetchManifest(arena, client, pin, key);
+    const dest = try std.fs.path.join(arena, &.{ rt.home, "parsers", pin.version, "bake" ++ exe_suffix });
+    try updates.install(arena, io, client, pin, manifest, parser_asset, dest);
+    if (rt.parser_path) |old| {
+        gpa.free(old);
+        gpa.free(rt.parser_version);
+    }
+    rt.parser_path = try gpa.dupe(u8, dest);
+    rt.parser_version = try gpa.dupe(u8, pin.version);
+    std.log.info("parsing with {s} from now on", .{pin.version});
+}
+
+/// Fetches the pinned worker, puts it in place of this one and exits for it to be started
+fn updateWorker(arena: Allocator, io: Io, client: *std.http.Client, rt: Runtime, pin: updates.Release, key: std.crypto.sign.Ed25519.PublicKey) !void {
+    if (!updates.plainVersion(pin.version)) return error.BadRelease;
+    const manifest = try updates.fetchManifest(arena, client, pin, key);
+    const staged = try std.fs.path.join(arena, &.{ rt.home, "updates", pin.version, worker_asset });
+    try updates.install(arena, io, client, pin, manifest, worker_asset, staged);
+    try updates.swapIn(arena, io, rt.exe, staged, try rt.pendingPath(arena), .{ .from = version, .to = pin.version });
+    std.log.info("updated to {s}: restarting", .{pin.version});
+    std.process.exit(restart_code);
+}
+
+fn isBad(arena: Allocator, io: Io, rt: Runtime, v: []const u8) bool {
+    const text = Io.Dir.cwd().readFileAlloc(io, rt.badPath(arena) catch return false, arena, .limited(256)) catch return false;
+
+    return std.mem.eql(u8, std.mem.trim(u8, text, " \r\n"), v);
+}
+
+/// A worker just put in place by an update gets updates.max_starts starts to reach the server; past that
+/// the one it replaced comes back, and its version is kept from being installed again
+fn checkTrial(arena: Allocator, io: Io, rt: *Runtime) !void {
+    const path = try rt.pendingPath(arena);
+    const pending = updates.readPending(arena, io, path);
+    switch (updates.trial(pending, version)) {
+        .none => {},
+        .stale => Io.Dir.cwd().deleteFile(io, path) catch {},
+        .start => {
+            const p = pending.?;
+            try updates.writePending(arena, io, path, .{ .from = p.from, .to = p.to, .starts = p.starts + 1 });
+            rt.on_trial = true;
+        },
+        .roll_back => {
+            const p = pending.?;
+            std.log.err("{s} didn't reach the server in {d} starts: going back to {s}", .{ version, p.starts, p.from });
+            try Io.Dir.cwd().writeFile(io, .{ .sub_path = try rt.badPath(arena), .data = version });
+            Io.Dir.cwd().deleteFile(io, path) catch {};
+            updates.rollBack(arena, io, rt.exe) catch |err| {
+                std.log.err("can't go back to {s} ({s}): staying on {s}", .{ p.from, @errorName(err), version });
+
+                return;
+            };
+            std.process.exit(restart_code);
+        },
+    }
+}
+
+fn endTrial(arena: Allocator, io: Io, rt: *Runtime) void {
+    rt.on_trial = false;
+    Io.Dir.cwd().deleteFile(io, rt.pendingPath(arena) catch return) catch {};
+    Io.Dir.cwd().deleteFile(io, std.fmt.allocPrint(arena, "{s}.old", .{rt.exe}) catch return) catch {};
+    Io.Dir.cwd().deleteTree(io, std.fs.path.join(arena, &.{ rt.home, "updates" }) catch return) catch {};
+    std.log.info("now running {s}", .{version});
+}
+
+/// What `bake version` says: the parser's .curves format
 fn parserVersion(arena: Allocator, io: Io, bake: []const u8) []const u8 {
     const result = std.process.run(arena, io, .{ .argv = &.{ bake, "version" }, .create_no_window = true }) catch return "";
     const text = std.mem.trim(u8, if (result.stderr.len > 0) result.stderr else result.stdout, " \r\n");
