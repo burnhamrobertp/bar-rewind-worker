@@ -43,11 +43,14 @@ pub fn checkManifest(arena: Allocator, json: []const u8, sig_hex: []const u8, ke
 }
 
 fn fetchText(arena: Allocator, client: *std.http.Client, url: []const u8) ![]const u8 {
-    var out: Io.Writer.Allocating = .init(arena);
-    const result = try client.fetch(.{ .location = .{ .url = url }, .response_writer = &out.writer });
-    if (result.status != .ok) return error.ReleaseUnavailable;
+    const reply = try api.getText(client, client.io, arena, url);
+    if (reply.status != 200) {
+        std.log.warn("{s} answered {d}", .{ url, reply.status });
 
-    return out.written();
+        return error.ReleaseUnavailable;
+    }
+
+    return reply.body;
 }
 
 pub fn fetchManifest(arena: Allocator, client: *std.http.Client, release: Release, key: Ed25519.PublicKey) !Manifest {
@@ -93,7 +96,11 @@ pub fn install(arena: Allocator, io: Io, client: *std.http.Client, release: Rele
     const part = try std.fmt.allocPrint(arena, "{s}.part", .{dest});
     if (std.fs.path.dirname(dest)) |dir| try Io.Dir.cwd().createDirPath(io, dir);
     const status = try api.download(client, io, try std.fmt.allocPrint(arena, "{s}{s}", .{ base, name }), part, true);
-    if (status != 200) return error.ReleaseUnavailable;
+    if (status != 200) {
+        std.log.warn("{s}{s} answered {d}", .{ base, name, status });
+
+        return error.ReleaseUnavailable;
+    }
     if (!matches(io, part, entry)) {
         Io.Dir.cwd().deleteFile(io, part) catch {};
 

@@ -364,12 +364,12 @@ fn endTrial(arena: Allocator, io: Io, rt: *Runtime) void {
     std.log.info("now running {s}", .{version});
 }
 
-/// What `bake version` says: the parser's .curves format
+/// The release `bake version` says it is; empty for a bake too old to say
 fn parserVersion(arena: Allocator, io: Io, bake: []const u8) []const u8 {
     const result = std.process.run(arena, io, .{ .argv = &.{ bake, "version" }, .create_no_window = true }) catch return "";
-    const text = std.mem.trim(u8, if (result.stderr.len > 0) result.stderr else result.stdout, " \r\n");
+    const said = std.json.parseFromSliceLeaky(struct { version: []const u8 }, arena, result.stdout, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return "";
 
-    return text[if (std.mem.lastIndexOfScalar(u8, text, ' ')) |at| at + 1 else 0..];
+    return said.version;
 }
 
 /// The parse folder needs one engine for BAR's pr-downloader to fetch the rest: the newest from the BAR

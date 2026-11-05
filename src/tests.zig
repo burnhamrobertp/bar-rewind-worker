@@ -1,4 +1,5 @@
 test {
+    _ = @import("api.zig");
     _ = @import("housekeeping.zig");
     _ = @import("install.zig");
     _ = @import("state.zig");
