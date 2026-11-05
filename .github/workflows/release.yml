@@ -1,7 +1,6 @@
 # Pushing a version tag (like 0.1.0) builds the worker for Windows and Linux with that version and the release key in
-# src/release-key.pub, signs their manifest with BAR-Rewind's sign tool and puts them in a draft release.
-# The key lives in the `release` environment, so a run waits for whoever that environment names as
-# reviewers; it is the same key BAR-Rewind's releases are signed with.
+# src/release-key.pub, signs their manifest with BAR-Rewind's sign tool and publishes the release. The key lives in
+# the `release` environment, which only version tags can use; it is the same key BAR-Rewind's releases are signed with.
 name: release
 
 on:
@@ -60,4 +59,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" zig-out/dist/* --draft --verify-tag --title "bar-rewind-worker $TAG" --generate-notes
+        run: gh release create "$TAG" zig-out/dist/* --verify-tag --latest --title "bar-rewind-worker $TAG" --generate-notes
