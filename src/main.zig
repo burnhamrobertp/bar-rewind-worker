@@ -20,6 +20,7 @@ const state = @import("state.zig");
 const supervise = @import("supervise.zig");
 const system = @import("system.zig");
 const updates = @import("updates.zig");
+const widgets = @import("widgets.zig");
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -49,6 +50,7 @@ const Runtime = struct {
     parser_path: ?[]const u8 = null,
     on_trial: bool = false,
     busy: housekeeping.Busy = .none,
+    widgets: []const u8 = "",
 
     fn pendingPath(rt: Runtime, arena: Allocator) ![]const u8 {
         return std.fs.path.join(arena, &.{ rt.home, "update.json" });
@@ -245,6 +247,7 @@ const Heartbeat = struct {
     paused: bool = false,
     pause_reason: ?[]const u8 = null,
     releases: struct { parser: ?updates.Release = null, worker: ?updates.Release = null } = .{},
+    widgets: []const u8 = "",
 };
 
 /// One round: report in, update to the pinned releases, then take and run a job if one fits. Returns how
@@ -259,7 +262,7 @@ fn serve(gpa: Allocator, io: Io, server: *api.Api, rt: *Runtime, base: job.Paths
     const beat = try server.post(arena, "/api/worker/heartbeat", .{
         .mem_mb = memory.total_mb, .mem_free_mb = memory.free_mb, .cpus = system.cpus(), .os = system.os_name, .version = version,
         .parser_version = if (rt.bake_override != null or rt.parser_path == null) parserVersion(arena, io, paths.bake) else rt.parser_version,
-        .disk_free_mb = system.diskFreeMb(arena, paths.bar),
+        .disk_free_mb = system.diskFreeMb(arena, paths.bar), .widgets = rt.widgets,
     });
     if (beat.status == 401) return error.Revoked;
     if (beat.status != 200) return error.Unexpected;
@@ -277,6 +280,12 @@ fn serve(gpa: Allocator, io: Io, server: *api.Api, rt: *Runtime, base: job.Paths
                 updateWorker(arena, io, server.client, rt.*, pin, key) catch |err| std.log.warn("can't update to worker {s}: {s}", .{ pin.version, @errorName(err) });
         };
     }
+    if (!std.mem.eql(u8, settings.widgets, rt.widgets)) {
+        try updateWidgets(gpa, arena, io, server, rt);
+
+        return 0;
+    }
+    if (rt.widgets.len > 0) paths.widgets = try widgetsDir(arena, rt.*);
     if (settings.paused) return settings.poll_seconds;
     const busy = housekeeping.busy(arena, io, paths.bar);
     if (busy != rt.busy) {
@@ -309,6 +318,30 @@ fn updateParser(gpa: Allocator, arena: Allocator, io: Io, client: *std.http.Clie
     rt.parser_path = try gpa.dupe(u8, dest);
     rt.parser_version = try gpa.dupe(u8, pin.version);
     std.log.info("parsing with {s} from now on", .{pin.version});
+}
+
+fn widgetsDir(arena: Allocator, rt: Runtime) ![]const u8 {
+    return std.fs.path.join(arena, &.{ rt.home, "widgets" });
+}
+
+/// The server's parse widgets, into a folder of their own that every parse is pointed at
+fn updateWidgets(gpa: Allocator, arena: Allocator, io: Io, server: *api.Api, rt: *Runtime) !void {
+    const reply = try server.post(arena, "/api/worker/widgets", .{});
+    if (reply.status == 401) return error.Revoked;
+    if (reply.status != 200) return error.Unexpected;
+    const set = try reply.parse(struct { hash: []const u8, files: []widgets.File }, arena);
+    for (set.files) |f| if (!widgets.validName(f.name)) return error.BadWidgetName;
+    if (!std.mem.eql(u8, try widgets.digest(arena, set.files), set.hash)) return error.WidgetsDontMatch;
+
+    const dir = try widgetsDir(arena, rt.*);
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    if (set.files.len > 0) {
+        try Io.Dir.cwd().createDirPath(io, dir);
+        for (set.files) |f| try Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ dir, f.name }), .data = f.text });
+    }
+    if (rt.widgets.len > 0) gpa.free(rt.widgets);
+    rt.widgets = if (set.hash.len > 0) try gpa.dupe(u8, set.hash) else "";
+    std.log.info("parse widgets: {d} file{s}", .{ set.files.len, if (set.files.len == 1) "" else "s" });
 }
 
 /// Fetches the pinned worker, puts it in place of this one and exits for it to be started

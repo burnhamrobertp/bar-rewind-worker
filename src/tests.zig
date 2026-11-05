@@ -6,4 +6,5 @@ test {
     _ = @import("supervise.zig");
     _ = @import("system.zig");
     _ = @import("updates.zig");
+    _ = @import("widgets.zig");
 }

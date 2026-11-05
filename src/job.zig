@@ -22,7 +22,7 @@ pub const Uploads = struct {
     pub const Upload = struct { url: []const u8, headers: std.json.ArrayHashMap([]const u8) };
 };
 
-pub const Paths = struct { bake: []const u8, bar: []const u8, work: []const u8 };
+pub const Paths = struct { bake: []const u8, bar: []const u8, work: []const u8, widgets: ?[]const u8 = null };
 
 const progress_seconds = 15;
 const events_listed = 200;
@@ -150,8 +150,11 @@ fn parse(arena: Allocator, io: Io, client: *std.http.Client, paths: Paths, claim
 
     const stderr = try Io.Dir.cwd().createFile(io, files.stderr, .{});
     defer stderr.close(io);
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(arena, &.{ paths.bake, "parse", files.demo, files.curves, "--bar", paths.bar, "--log", files.log });
+    if (paths.widgets) |w| try argv.appendSlice(arena, &.{ "--widgets", w });
     var child = try std.process.spawn(io, .{
-        .argv = &.{ paths.bake, "parse", files.demo, files.curves, "--bar", paths.bar, "--log", files.log },
+        .argv = argv.items,
         .stdin = .ignore,
         .stdout = .pipe,
         .stderr = .{ .file = stderr },
