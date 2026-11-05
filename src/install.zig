@@ -23,8 +23,8 @@ pub fn installedExe(arena: Allocator, home: []const u8) ![]const u8 {
 pub fn install(arena: Allocator, io: Io, env: *std.process.Environ.Map, home: []const u8, args: []const []const u8, task: []const u8) ![]const u8 {
     const exe = try installedExe(arena, home);
     if (windows) {
-        _ = run(arena, io, &.{ "schtasks", "/End", "/TN", task }) catch {};
-    } else _ = run(arena, io, &.{ "systemctl", "--user", "stop", unit_name }) catch {};
+        stopIfRunning(arena, io, &.{ "schtasks", "/End", "/TN", task });
+    } else stopIfRunning(arena, io, &.{ "systemctl", "--user", "stop", unit_name });
     const self = try std.process.executablePathAlloc(io, arena);
     if (!std.mem.eql(u8, self, exe)) {
         try Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(exe).?);
@@ -37,7 +37,7 @@ pub fn install(arena: Allocator, io: Io, env: *std.process.Environ.Map, home: []
 
 pub fn uninstall(arena: Allocator, io: Io, env: *std.process.Environ.Map, task: []const u8) !void {
     if (windows) {
-        _ = run(arena, io, &.{ "schtasks", "/End", "/TN", task }) catch {};
+        stopIfRunning(arena, io, &.{ "schtasks", "/End", "/TN", task });
         if (!try run(arena, io, &.{ "schtasks", "/Delete", "/TN", task, "/F" })) return error.TaskNotRemoved;
 
         return;
@@ -53,6 +53,11 @@ fn run(arena: Allocator, io: Io, argv: []const []const u8) !bool {
     std.log.warn("{s} said: {s}{s}", .{ argv[0], std.mem.trim(u8, result.stdout, " \r\n"), std.mem.trim(u8, result.stderr, " \r\n") });
 
     return false;
+}
+
+/// Stopping what isn't installed or running fails, and that's fine: it says nothing
+fn stopIfRunning(arena: Allocator, io: Io, argv: []const []const u8) void {
+    _ = std.process.run(arena, io, .{ .argv = argv, .create_no_window = true }) catch {};
 }
 
 fn xmlEscape(w: *Io.Writer, text: []const u8) !void {
