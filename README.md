@@ -23,7 +23,7 @@ stopped, which is handy for watching what it does.
 | | |
 |-|-|
 | `--server <url>` | the server to work for (default `https://bar-rewind.robotofham.com`) |
-| `--bake <path>` | parse with this `bake` instead of the release the server pins |
+| `--bake <path>` | parse with this `bake` instead of downloading the pinned release; while a parser is pinned, the server only hands out jobs if this `bake` is that release |
 
 ## Staying out of the way
 
