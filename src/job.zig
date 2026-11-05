@@ -103,7 +103,7 @@ pub fn run(gpa: Allocator, io: Io, server: *api.Api, paths: Paths, claim: Claim)
     const peak = shared.peak(io);
     uploadLog(arena, io, server, claim.uploads.log, &.{ stderr_path, log });
     const delivered = if (outcome) |_| deliver(arena, io, server, paths, id, claim, &shared, curves, packed_path, peak) else |err| err;
-    if (delivered) |_| {} else |err| {
+    if (delivered) |_| std.log.info("job {s} done", .{id}) else |err| {
         const message = failure orelse @errorName(err);
         const oom = (memory.total_mb > 0 and peak * 100 >= memory.total_mb * 85) or
             std.ascii.findIgnoreCase(message, "out of memory") != null or std.mem.indexOf(u8, message, "bad_alloc") != null;
