@@ -177,7 +177,15 @@ fn parse(arena: Allocator, io: Io, client: *std.http.Client, paths: Paths, claim
     var buffer: [64 << 10]u8 = undefined;
     var reader = child.stdout.?.readerStreaming(io, &buffer);
     var last_error: ?[]const u8 = null;
-    while (reader.interface.takeDelimiter('\n') catch null) |raw| {
+    while (true) {
+        // a line too big for the buffer is skipped, not the end: bake would block on a pipe nobody drains
+        const raw = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+            error.StreamTooLong => {
+                _ = reader.interface.discardDelimiterInclusive('\n') catch break;
+                continue;
+            },
+            error.ReadFailed => break,
+        } orelse break;
         const line = std.json.parseFromSliceLeaky(Line, arena, std.mem.trim(u8, raw, " \r"), .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch continue;
         if (line.@"error") |e| last_error = e else shared.set(io, line.pct, line.text);
         shared.notePeak(io, tree.peakMb(io, arena));
