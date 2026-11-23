@@ -269,15 +269,15 @@ fn serve(gpa: Allocator, io: Io, server: *api.Api, rt: *Runtime, base: job.Paths
     if (rt.on_trial) endTrial(arena, io, rt);
     const settings = try beat.parse(Heartbeat, arena);
     if (releaseKey()) |key| {
-        if (rt.bake_override == null) if (settings.releases.parser) |pin| if (!std.mem.eql(u8, pin.version, rt.parser_version)) {
-            try updateParser(gpa, arena, io, server.client, rt, pin, key);
-
-            return 0;
-        };
         // a build of your own stays itself
         if (!std.mem.eql(u8, version, "0.0.0-dev")) if (settings.releases.worker) |pin| {
             if (!std.mem.eql(u8, pin.version, version) and !isBad(arena, io, rt.*, pin.version))
                 updateWorker(arena, io, server.client, rt.*, pin, key) catch |err| std.log.warn("can't update to worker {s}: {s}", .{ pin.version, @errorName(err) });
+        };
+        if (rt.bake_override == null) if (settings.releases.parser) |pin| if (!std.mem.eql(u8, pin.version, rt.parser_version)) {
+            try updateParser(gpa, arena, io, server.client, rt, pin, key);
+
+            return 0;
         };
     }
     if (!std.mem.eql(u8, settings.widgets, rt.widgets)) {
