@@ -249,13 +249,16 @@ test "a file longer than the read buffer matches its hash" {
     const io = std.testing.io;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
+
     const data = try arena.allocator().alloc(u8, 823616);
-    for (data, 0..) |*byte, i| byte.* = @truncate(i *% 31 +% i / 256);
+    for (data, 0..) |*byte, i| byte.* = @intCast(i % 251);
     try tmp.dir.writeFile(io, .{ .sub_path = "bake", .data = data });
     const path = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}/bake", .{tmp.sub_path});
+
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(data, &digest, .{});
     const hex = std.fmt.bytesToHex(digest, .lower);
+
     try std.testing.expect(matches(io, path, .{ .name = "bake", .size = data.len, .sha256 = &hex }));
 }
 
