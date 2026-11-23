@@ -334,12 +334,13 @@ fn updateWidgets(gpa: Allocator, arena: Allocator, io: Io, server: *api.Api, rt:
     if (!std.mem.eql(u8, try widgets.digest(arena, set.files), set.hash)) return error.WidgetsDontMatch;
 
     const dir = try widgetsDir(arena, rt.*);
+    if (rt.widgets.len > 0) gpa.free(rt.widgets);
+    rt.widgets = "";
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     if (set.files.len > 0) {
         try Io.Dir.cwd().createDirPath(io, dir);
         for (set.files) |f| try Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ dir, f.name }), .data = f.text });
     }
-    if (rt.widgets.len > 0) gpa.free(rt.widgets);
     rt.widgets = if (set.hash.len > 0) try gpa.dupe(u8, set.hash) else "";
     std.log.info("parse widgets: {d} file{s}", .{ set.files.len, if (set.files.len == 1) "" else "s" });
 }
